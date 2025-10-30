@@ -77,10 +77,28 @@ az storage account create `
   --kind StorageV2 `
   --https-only true | Write-Output
 
-# Give managed identity Storage Blob Data Contributor role
+# Wait for storage account to exist and keys to be ready (retry loop)
+$maxAttempts = 12
+$attempt = 0
+while ($attempt -lt $maxAttempts) {
+  try {
+    $acct = az storage account show --name $STORAGE_ACCOUNT_NAME --resource-group $RG_NAME -o json 2>$null | ConvertFrom-Json
+    if ($acct -ne $null) { break }
+  } catch {}
+  Start-Sleep -Seconds 10
+  $attempt++
+  Write-Host "Waiting for storage account to be ready... attempt $attempt/$maxAttempts"
+}
+if ($acct -eq $null) { throw "Storage account $STORAGE_ACCOUNT_NAME not found after wait." }
+
+# Get key after confirmed existence
+$storageKey = az storage account keys list --account-name $STORAGE_ACCOUNT_NAME --resource-group $RG_NAME --query '[0].value' -o tsv
+
+# Give managed identity Storage Blob Data Contributor role (specify assignee type)
 $storageScope = "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG_NAME/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACCOUNT_NAME"
 az role assignment create `
   --assignee-object-id $IDENTITY_PRINCIPAL_ID `
+  --assignee-principal-type ServicePrincipal `
   --role "Storage Blob Data Contributor" `
   --scope $storageScope | Write-Output
 
@@ -88,12 +106,13 @@ az role assignment create `
 # NOTE: change admin password to secure secret retrieval in production
 $adminPwd = "YourStrongPassword123!"
 try {
-  az sql server create `
+  $sqlCreate = az sql server create `
     --name $DB_SERVER_NAME `
     --resource-group $RG_NAME `
     --location $LOCATION `
     --admin-user "sqladmin" `
-    --admin-password $adminPwd | Write-Output
+    --admin-password $adminPwd -o json 2>&1 | ConvertFrom-Json
+  if (-not $sqlCreate.id) { throw "SQL server create returned no id; check error." }
 
   az sql db create `
     --name $DB_NAME `
@@ -101,8 +120,8 @@ try {
     --server $DB_SERVER_NAME `
     --service-objective Basic | Write-Output
 } catch {
-  Write-Warning "SQL create failed: $_"
-  Write-Warning "If region doesn't allow provisioning, try a different location or pre-create server in portal."
+  Write-Error "SQL create failed: $_"
+  throw "Aborting due to SQL create failure. Pre-create SQL server manually or pick a supported region."
 }
 
 # 6. Create Public IP for Application Gateway
@@ -113,8 +132,7 @@ az network public-ip create `
   --allocation-method Static `
   --version IPv4 | Write-Output
 
-# 7. Create Application Gateway (basic create - CLI will create defaults)
-# Ensure we pass a minimal config and set sku Standard_v2
+# 7. Create Application Gateway (provide minimal required fields incl. priority)
 try {
   az network application-gateway create `
     --name $AGW_NAME `
@@ -124,7 +142,10 @@ try {
     --subnet $SUBNET_AGW_NAME `
     --public-ip-address $AGW_PIP_NAME `
     --sku Standard_v2 `
-    --no-wait | Write-Output
+    --capacity 2 `
+    --frontend-port 80 `
+    --http-settings-port 80 `
+    --priority 100 | Write-Output
 } catch {
   Write-Warning "Application Gateway create failed: $_"
 }
