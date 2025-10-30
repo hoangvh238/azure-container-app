@@ -1,142 +1,201 @@
-# Variables
-$STAFF_CODE="SD6127"
-$LOCATION="eastus"
-$RG_NAME="rg-$STAFF_CODE-container-apps"
-$VNET_NAME="vnet-$STAFF_CODE"
-$SUBNET_CONTAINER_NAME="snet-container"
-$SUBNET_AGW_NAME="snet-agw"
-$MANAGED_IDENTITY_NAME="id-$STAFF_CODE"
-$CONTAINER_APP_ENV="env-$STAFF_CODE"
-$CONTAINER_APP_NAME="app-$STAFF_CODE"
-$STORAGE_ACCOUNT_NAME="st${STAFF_CODE}".ToLower()
-$DB_SERVER_NAME="sql-$STAFF_CODE"
-$DB_NAME="simplcommerce"
-$AGW_NAME="agw-$STAFF_CODE"
-$AGW_PIP_NAME="pip-$STAFF_CODE-agw"
+# deploy_fixed.ps1
+#region variables
+$STAFF_CODE = "SD6127"
+$LOCATION = "eastus2"              
+$SUBSCRIPTION_ID = (az account show --query id -o tsv)
+$RG_NAME = "rg-$STAFF_CODE-container-apps"
+$VNET_NAME = "vnet-$STAFF_CODE"
+$SUBNET_CONTAINER_NAME = "snet-container"
+$SUBNET_AGW_NAME = "snet-agw"
+$MANAGED_IDENTITY_NAME = "id-$STA_CODE" -replace '\$','SD6127'  # ensure correct name if copy/paste; or use below exact
+$MANAGED_IDENTITY_NAME = "id-$STAFF_CODE"
+$CONTAINER_APP_ENV = "env-$STAFF_CODE"
+$CONTAINER_APP_NAME = "app-$STAFF_CODE"
+$STORAGE_ACCOUNT_NAME = ("st{0}" -f $STAFF_CODE).ToLower()
+$DB_SERVER_NAME = "sql-$STAFF_CODE"
+$DB_NAME = "simplcommerce"
+$AGW_NAME = "agw-$STAFF_CODE"
+$AGW_PIP_NAME = "pip-$STAFF_CODE-agw"
+$LA_NAME = "laworkspace-$STAFF_CODE"
+#endregion
+
+function Wait-ProviderRegistered($provider) {
+    Write-Host "Registering provider $provider ..."
+    az provider register -n $provider --wait | Out-Null
+    $status = az provider show -n $provider --query "registrationState" -o tsv
+    if ($status -ne "Registered") {
+        throw "Provider $provider not registered (status: $status)"
+    }
+    Write-Host "$provider registered."
+}
+
+# ensure correct subscription
+az account set --subscription $SUBSCRIPTION_ID
+
+# register required providers
+$providers = @("Microsoft.App","Microsoft.OperationalInsights","Microsoft.Insights","Microsoft.Storage","Microsoft.Sql","Microsoft.Network")
+foreach ($p in $providers) { Wait-ProviderRegistered $p }
 
 # 1. Create Resource Group
-az group create --name $RG_NAME --location $LOCATION
+az group create --name $RG_NAME --location $LOCATION | Write-Output
 
 # 2. Create Virtual Network and Subnets
 az network vnet create `
-    --name $VNET_NAME `
-    --resource-group $RG_NAME `
-    --location $LOCATION `
-    --address-prefix "10.0.0.0/16"
+  --name $VNET_NAME `
+  --resource-group $RG_NAME `
+  --location $LOCATION `
+  --address-prefix "10.0.0.0/16" | Write-Output
 
-# Create subnet for Container Apps (needs /23 or larger)
 az network vnet subnet create `
-    --resource-group $RG_NAME `
-    --vnet-name $VNET_NAME `
-    --name $SUBNET_CONTAINER_NAME `
-    --address-prefix "10.0.0.0/23"
+  --resource-group $RG_NAME `
+  --vnet-name $VNET_NAME `
+  --name $SUBNET_CONTAINER_NAME `
+  --address-prefix "10.0.0.0/23" `
+  --disable-private-endpoint-network-policies true | Write-Output
 
-# Create subnet for Application Gateway
 az network vnet subnet create `
-    --resource-group $RG_NAME `
-    --vnet-name $VNET_NAME `
-    --name $SUBNET_AGW_NAME `
-    --address-prefix "10.0.2.0/24"
+  --resource-group $RG_NAME `
+  --vnet-name $VNET_NAME `
+  --name $SUBNET_AGW_NAME `
+  --address-prefix "10.0.2.0/24" | Write-Output
 
 # 3. Create User-assigned Managed Identity
-az identity create `
-    --name $MANAGED_IDENTITY_NAME `
-    --resource-group $RG_NAME `
-    --location $LOCATION
+$identity = az identity create `
+  --name $MANAGED_IDENTITY_NAME `
+  --resource-group $RG_NAME `
+  --location $LOCATION | ConvertFrom-Json
 
-# Get the identity's principal ID
-$IDENTITY_PRINCIPAL_ID = az identity show --name $MANAGED_IDENTITY_NAME --resource-group $RG_NAME --query principalId -o tsv
-$IDENTITY_ID = az identity show --name $MANAGED_IDENTITY_NAME --resource-group $RG_NAME --query id -o tsv
+$IDENTITY_PRINCIPAL_ID = $identity.principalId
+$IDENTITY_ID = $identity.id
 
 # 4. Create Storage Account
 az storage account create `
-    --name $STORAGE_ACCOUNT_NAME `
-    --resource-group $RG_NAME `
-    --location $LOCATION `
-    --sku Standard_LRS
+  --name $STORAGE_ACCOUNT_NAME `
+  --resource-group $RG_NAME `
+  --location $LOCATION `
+  --sku Standard_LRS `
+  --kind StorageV2 `
+  --https-only true | Write-Output
 
-# Assign RBAC role to managed identity for storage account
+# Give managed identity Storage Blob Data Contributor role
+$storageScope = "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG_NAME/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACCOUNT_NAME"
 az role assignment create `
-    --assignee $IDENTITY_PRINCIPAL_ID `
-    --role "Storage Blob Data Contributor" `
-    --scope "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG_NAME/providers/Microsoft.Storage/storageAccounts/$STORAGE_ACCOUNT_NAME"
+  --assignee-object-id $IDENTITY_PRINCIPAL_ID `
+  --role "Storage Blob Data Contributor" `
+  --scope $storageScope | Write-Output
 
-# 5. Create Azure SQL Database
-az sql server create `
+# 5. Create Azure SQL Server & DB (use eastus2 to avoid region limit)
+# NOTE: change admin password to secure secret retrieval in production
+$adminPwd = "YourStrongPassword123!"
+try {
+  az sql server create `
     --name $DB_SERVER_NAME `
     --resource-group $RG_NAME `
     --location $LOCATION `
     --admin-user "sqladmin" `
-    --admin-password "YourStrongPassword123!"
+    --admin-password $adminPwd | Write-Output
 
-az sql db create `
+  az sql db create `
     --name $DB_NAME `
     --resource-group $RG_NAME `
     --server $DB_SERVER_NAME `
-    --service-objective Basic
+    --service-objective Basic | Write-Output
+} catch {
+  Write-Warning "SQL create failed: $_"
+  Write-Warning "If region doesn't allow provisioning, try a different location or pre-create server in portal."
+}
 
-# 6. Create Application Gateway
-# Create Public IP for Application Gateway
+# 6. Create Public IP for Application Gateway
 az network public-ip create `
-    --resource-group $RG_NAME `
-    --name $AGW_PIP_NAME `
-    --sku Standard `
-    --version IPv4
+  --resource-group $RG_NAME `
+  --name $AGW_PIP_NAME `
+  --sku Standard `
+  --allocation-method Static `
+  --version IPv4 | Write-Output
 
-# Create Application Gateway
-az network application-gateway create `
+# 7. Create Application Gateway (basic create - CLI will create defaults)
+# Ensure we pass a minimal config and set sku Standard_v2
+try {
+  az network application-gateway create `
     --name $AGW_NAME `
     --resource-group $RG_NAME `
     --location $LOCATION `
     --vnet-name $VNET_NAME `
     --subnet $SUBNET_AGW_NAME `
     --public-ip-address $AGW_PIP_NAME `
-    --sku Standard_v2
+    --sku Standard_v2 `
+    --no-wait | Write-Output
+} catch {
+  Write-Warning "Application Gateway create failed: $_"
+}
 
-# 7. Create Container Apps Environment
+# 8. Create Log Analytics workspace BEFORE Container Apps env
+az monitor log-analytics workspace create `
+  --resource-group $RG_NAME `
+  --workspace-name $LA_NAME `
+  --location $LOCATION | Write-Output
+
+# Get workspace id
+$LA_ID = az monitor log-analytics workspace show --resource-group $RG_NAME --workspace-name $LA_NAME --query id -o tsv
+
+# 9. Create Container Apps Environment (requires workspace and registered provider)
 az containerapp env create `
-    --name $CONTAINER_APP_ENV `
-    --resource-group $RG_NAME `
-    --location $LOCATION `
-    --infrastructure-subnet-resource-id "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG_NAME/providers/Microsoft.Network/virtualNetworks/$VNET_NAME/subnets/$SUBNET_CONTAINER_NAME"
+  --name $CONTAINER_APP_ENV `
+  --resource-group $RG_NAME `
+  --location $LOCATION `
+  --infrastructure-subnet-resource-id "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG_NAME/providers/Microsoft.Network/virtualNetworks/$VNET_NAME/subnets/$SUBNET_CONTAINER_NAME" `
+  --logs-workspace-id $LA_ID | Write-Output
 
-# 8. Deploy SimplCommerce Container App
+# 10. Deploy Container App (get storage key for env var)
+$storageKey = az storage account keys list --account-name $STORAGE_ACCOUNT_NAME --resource-group $RG_NAME --query '[0].value' -o tsv
+
 az containerapp create `
-    --name $CONTAINER_APP_NAME `
-    --resource-group $RG_NAME `
-    --environment $CONTAINER_APP_ENV `
-    --image "simplcommerce/simplcommercedemo:latest" `
-    --target-port 80 `
-    --ingress external `
-    --user-assigned $IDENTITY_ID `
-    --env-vars "ConnectionStrings__DefaultConnection=Server=tcp:$DB_SERVER_NAME.database.windows.net;Database=$DB_NAME;Authentication=Active Directory Default;TrustServerCertificate=True" `
-    "AzureStorage__ConnectionString=DefaultEndpointsProtocol=https;AccountName=$STORAGE_ACCOUNT_NAME;AccountKey=$(az storage account keys list --account-name $STORAGE_ACCOUNT_NAME --resource-group $RG_NAME --query '[0].value' -o tsv);EndpointSuffix=core.windows.net"
+  --name $CONTAINER_APP_NAME `
+  --resource-group $RG_NAME `
+  --environment $CONTAINER_APP_ENV `
+  --image "simplcommerce/simplcommercedemo:latest" `
+  --target-port 80 `
+  --ingress external `
+  --user-assigned $IDENTITY_ID `
+  --env-vars "ConnectionStrings__DefaultConnection=Server=tcp:$DB_SERVER_NAME.database.windows.net;Database=$DB_NAME;Authentication=Active Directory Default;TrustServerCertificate=True" "AzureStorage__ConnectionString=DefaultEndpointsProtocol=https;AccountName=$STORAGE_ACCOUNT_NAME;AccountKey=$storageKey;EndpointSuffix=core.windows.net" | Write-Output
 
-# 9. Configure Application Gateway backend pool with Container App
+# 11. Configure Application Gateway backend pool only if container app FQDN exists
 $CONTAINER_APP_FQDN = az containerapp show --name $CONTAINER_APP_NAME --resource-group $RG_NAME --query properties.configuration.ingress.fqdn -o tsv
 
-az network application-gateway address-pool create `
-    --gateway-name $AGW_NAME `
-    --resource-group $RG_NAME `
-    --name "containerapp-pool" `
-    --servers $CONTAINER_APP_FQDN
+if ([string]::IsNullOrEmpty($CONTAINER_APP_FQDN)) {
+    Write-Warning "Container App FQDN not available. Skipping AG backend pool creation. If you want AG in front, configure backend pool manually once FQDN is ready."
+} else {
+    az network application-gateway address-pool create `
+      --gateway-name $AGW_NAME `
+      --resource-group $RG_NAME `
+      --name "containerapp-pool" `
+      --servers $CONTAINER_APP_FQDN | Write-Output
 
-# Configure HTTP settings
-az network application-gateway http-settings create `
-    --gateway-name $AGW_NAME `
-    --resource-group $RG_NAME `
-    --name "containerapp-http-settings" `
-    --port 80 `
-    --protocol Http
+    # Create http-settings and listener and rule - ensure priority is provided
+    az network application-gateway http-settings create `
+      --gateway-name $AGW_NAME `
+      --resource-group $RG_NAME `
+      --name "containerapp-http-settings" `
+      --port 80 `
+      --protocol Http | Write-Output
 
-# Add routing rule
-az network application-gateway rule create `
-    --gateway-name $AGW_NAME `
-    --resource-group $RG_NAME `
-    --name "containerapp-rule" `
-    --address-pool "containerapp-pool" `
-    --http-settings "containerapp-http-settings" `
-    --http-listener "containerapp-listener" `
-    --priority 100
+    # create listener (if not exists)
+    az network application-gateway http-listener create `
+      --gateway-name $AGW_NAME `
+      --resource-group $RG_NAME `
+      --name "containerapp-listener" `
+      --frontend-port 80 `
+      --frontend-ip "appGatewayFrontendIP" | Out-Null
 
-Write-Host "Deployment completed! Please take screenshots of the Azure Portal showing the deployed resources."
+    # create rule (NOTE: priority is required)
+    az network application-gateway rule create `
+      --gateway-name $AGW_NAME `
+      --resource-group $RG_NAME `
+      --name "containerapp-rule" `
+      --address-pool "containerapp-pool" `
+      --http-settings "containerapp-http-settings" `
+      --http-listener "containerapp-listener" `
+      --priority 100 | Write-Output
+}
+
+Write-Host "Deployment script finished. Check outputs and portal for resources."
