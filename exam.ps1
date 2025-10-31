@@ -156,20 +156,50 @@ az monitor log-analytics workspace create `
   --workspace-name $LA_NAME `
   --location $LOCATION | Write-Output
 
-# Get workspace id
-$LA_ID = az monitor log-analytics workspace show --resource-group $RG_NAME --workspace-name $LA_NAME --query id -o tsv
+# Get workspace id and key
+$LA_CUSTOMER_ID = az monitor log-analytics workspace show --resource-group $RG_NAME --workspace-name $LA_NAME --query customerId -o tsv
+$LA_KEY = az monitor log-analytics workspace get-shared-keys --resource-group $RG_NAME --workspace-name $LA_NAME --query primarySharedKey -o tsv
 
+Write-Host "Creating Container Apps Environment..."
 # 9. Create Container Apps Environment (requires workspace and registered provider)
 az containerapp env create `
   --name $CONTAINER_APP_ENV `
   --resource-group $RG_NAME `
   --location $LOCATION `
   --infrastructure-subnet-resource-id "/subscriptions/$SUBSCRIPTION_ID/resourceGroups/$RG_NAME/providers/Microsoft.Network/virtualNetworks/$VNET_NAME/subnets/$SUBNET_CONTAINER_NAME" `
-  --logs-workspace-id $LA_ID | Write-Output
+  --logs-workspace-id $LA_CUSTOMER_ID `
+  --logs-workspace-key $LA_KEY
+
+# Wait for environment to be ready
+Start-Sleep -Seconds 60
 
 # 10. Deploy Container App (get storage key for env var)
+Write-Host "Waiting for Container Apps Environment to be ready..."
+$maxAttempts = 12
+$attempt = 0
+$envReady = $false
+
+while ($attempt -lt $maxAttempts -and -not $envReady) {
+    try {
+        $env = az containerapp env show --name $CONTAINER_APP_ENV --resource-group $RG_NAME 2>$null
+        if ($env) {
+            $envReady = $true
+            break
+        }
+    } catch {}
+    Start-Sleep -Seconds 30
+    $attempt++
+    Write-Host "Checking Container Apps Environment... attempt $attempt/$maxAttempts"
+}
+
+if (-not $envReady) {
+    throw "Container Apps Environment not ready after waiting. Please check the environment status in the portal."
+}
+
+Write-Host "Getting storage key..."
 $storageKey = az storage account keys list --account-name $STORAGE_ACCOUNT_NAME --resource-group $RG_NAME --query '[0].value' -o tsv
 
+Write-Host "Creating Container App..."
 az containerapp create `
   --name $CONTAINER_APP_NAME `
   --resource-group $RG_NAME `
@@ -178,7 +208,10 @@ az containerapp create `
   --target-port 80 `
   --ingress external `
   --user-assigned $IDENTITY_ID `
-  --env-vars "ConnectionStrings__DefaultConnection=Server=tcp:$DB_SERVER_NAME.database.windows.net;Database=$DB_NAME;Authentication=Active Directory Default;TrustServerCertificate=True" "AzureStorage__ConnectionString=DefaultEndpointsProtocol=https;AccountName=$STORAGE_ACCOUNT_NAME;AccountKey=$storageKey;EndpointSuffix=core.windows.net" | Write-Output
+  --env-vars "ConnectionStrings__DefaultConnection=Server=tcp:$DB_SERVER_NAME.database.windows.net;Database=$DB_NAME;Authentication=Active Directory Default;TrustServerCertificate=True" "AzureStorage__ConnectionString=DefaultEndpointsProtocol=https;AccountName=$STORAGE_ACCOUNT_NAME;AccountKey=$storageKey;EndpointSuffix=core.windows.net"
+
+# Wait for Container App to be ready
+Start-Sleep -Seconds 60
 
 # 11. Configure Application Gateway backend pool only if container app FQDN exists
 $CONTAINER_APP_FQDN = az containerapp show --name $CONTAINER_APP_NAME --resource-group $RG_NAME --query properties.configuration.ingress.fqdn -o tsv
