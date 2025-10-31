@@ -51,7 +51,8 @@ az network vnet subnet create `
   --vnet-name $VNET_NAME `
   --name $SUBNET_CONTAINER_NAME `
   --address-prefix "10.0.0.0/23" `
-  --disable-private-endpoint-network-policies true | Write-Output
+  --disable-private-endpoint-network-policies true `
+  --delegations Microsoft.App/environments | Write-Output
 
 az network vnet subnet create `
   --resource-group $RG_NAME `
