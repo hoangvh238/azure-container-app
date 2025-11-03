@@ -1,16 +1,16 @@
 # deploy_fixed.ps1
 #region variables
-$STAFF_CODE = "SD6127"
+$STAFF_CODE = "sd6127"
 $LOCATION = "eastus2"              
 $SUBSCRIPTION_ID = (az account show --query id -o tsv)
 $RG_NAME = "rg-$STAFF_CODE-container-apps"
 $VNET_NAME = "vnet-$STAFF_CODE"
 $SUBNET_CONTAINER_NAME = "snet-container"
 $SUBNET_AGW_NAME = "snet-agw"
-$MANAGED_IDENTITY_NAME = "id-$STA_CODE" -replace '\$','SD6127'  # ensure correct name if copy/paste; or use below exact
+$MANAGED_IDENTITY_NAME = "id-$STA_CODE" -replace '\$','sd6127'  # ensure correct name if copy/paste; or use below exact
 $MANAGED_IDENTITY_NAME = "id-$STAFF_CODE"
 $CONTAINER_APP_ENV = "env-$STAFF_CODE"
-$CONTAINER_APP_NAME = "app-$STAFF_CODE"
+$CONTAINER_APP_NAME = "app$STAFF_CODE"
 $STORAGE_ACCOUNT_NAME = ("st{0}" -f $STAFF_CODE).ToLower()
 $DB_SERVER_NAME = "sql-$STAFF_CODE"
 $DB_NAME = "simplcommerce"
